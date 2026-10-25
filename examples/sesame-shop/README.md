@@ -1,5 +1,20 @@
 # Sesame Tutorial
 
+## Table of Contents
+
+- [Introduction](#introduction)
+- [Your Standard Item-Shop](#your-standard-item-shop)
+- [Action-Driven Policy vs Sesame's Data-Driven Policy](#action-driven-policy-vs-sesames-data-driven-policy)
+- [Integration 1: Defining the Context](#integration-1-defining-the-context)
+- [Integration 2: Defining Policies](#integration-2-defining-policies)
+- [Integration 3-A: Sesame in the Data Layer](#integration-3-a-sesame-in-the-data-layer)
+- [Integration 3-B: Sesame in the API Layer](#integration-3-b-sesame-in-the-api-layer)
+- [Integration 3-C: Sesame in the Business Layer: Privacy Regions](#integration-3-c-sesame-in-the-business-layer-privacy-regoins)
+  - [Verified Regions](#verified-regions)
+  - [Critical Regions](#critical-regions)
+  - [Unchecked Critical Regions](#unchecked-critical-regions)
+  - [Sandboxes](#sandboxes)
+
 ## Introduction
 
 This guide is for developpers who want to protect their application with Sesame. It assumes the developper is using, or is willing to migrate to, frameworks provided by Sesame. Integration of sesame into unsupported frameworks is out of scope for this guide.
