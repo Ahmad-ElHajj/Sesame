@@ -1,5 +1,7 @@
 # Sesame Tutorial
 
+## Introduction
+
 This guide is for developpers who want to protect their application with Sesame. It assumes the developper is using, or is willing to migrate to, frameworks provided by Sesame. Integration of sesame into unsupported frameworks is out of scope for this guide.
 
 Sesame is a security tool that helps developpers avoid accessing objects in unintended manners. Sesame's philosophy is to hide the instantiation of an object of type `T` behind a "private container" `PCon<T, P>`, and attach to it a "policy" `P`. This policy `P` implements a method that, depending on a `Context` and a `Reason` object, signals whether or not the instance of `T` is allowed to be manipulated. Having both a `Context` and a `Reason` object may seem redundant. Their difference, however, highlights how Sesame defines its trust boundary. `Context` is a developper-defined object, usually containing the information one would store in a cookie, whereas `Reason` is a framework-defined object that is not extendable without a custom build of sesame. 
@@ -13,6 +15,9 @@ struct PCon<T, P: Policy> {
 ```
 
 We will use a top-down approach for integrating sesame. That is, starting with the api layer, changing how endpoints are protected, and trickling the changes down to the database connector. Note here that both the endpoint handler framework `rocket` and the SQL database connector `mysql` are both already ported to sesame under the packages `sesame_rocket` and `sesame_mysql` respectively.
+
+
+## Your Standard Item-Shop
 
 Consider the following simple item shop app we will call Sesame-Shop. 
 ```rs
@@ -174,6 +179,8 @@ impl Database {
 ```
 Notice that for simplicity's sake, ids in this application double as api keys.
 
+## Action-Driven Policy vs Sesame's Data-Driven Policy
+
 As application developers, we wish to enforce security policies on our shop. Often, these policies dictate the enforcement of the legal privacy policy users agree to upon sign up. For example, a privacy policy might include a clause which claims the application will not share a user's balance with users that are not admins. To implement such policies, most developers opt for a heirarchy of if-else statements at each endpoint. Numerous security breaches have proved that this approach is error-prone and requires high levels of awareness, reasoning, and developper discipline. This problem is amplified in larger applications where access control is more complicated and dependes on complex roles and access tags.
 
 To control access, Sesame adopts a data-driven-policy approach of specifying the policy on the data itself: For every data type instance that enters (through a "source") or exits (through a "sink") a policy, attached to that type, must accompany it. This is the driving principle behind the `PCon<T, P>` object.
@@ -213,6 +220,8 @@ Instead of checking if the role provides sufficient permissions to trigger the a
 Notice that this fact implies a user can still trigger an illegal endpoint which internally performs ressource-intensive computations but never reads or writes to disk or to network while executing. This is because protecting such an endpoint should not be viewed as a data protection problem. For non-data-access control measures, a developper would still need to rely on other means such as action-driven policy validation.
 
 Lucky for us, all of Sesame-Shop's policies can be formulated from a data-driven-policy perspective. And so we have exactly 5 policies to implement: `ViewUserPolicy`, `ViewPurchasePolicy`, `AddPurchasePolicy`, `ViewItemPolicy`, `AddItemPolicy`. Looking at the schema for each of `User`, `Purchase`, and `Item`, we notice that the context needed to check `ViewUserPolicy`, `ViewItemPolicy`, `AddItemPolicy` is simply the user making the request. However, with `ViewPurchasePolicy`, because determining the "seller" of a `Purchase` the context will also require a database connection in addition to the user making the query. `AddPurchasePolicy` also requires the database connection to inspect the `Item`'s available quantity.
+
+## Integration 1: Defining the Context
 
 With that in mind, let's add our first sesame file `context.rs`.
 ```rs
@@ -281,6 +290,8 @@ impl<'a, 'r> FromPConRequest<'a, 'r> for ContextData {
 Notice that the cookie's value is parsed with `into_verified(VerifiedRegion::new(...))` rather than by taking it out of its `PCon`. Sesame only lets `discard_box()` unwrap a `PCon<T, NoPolicy>`; for every other policy, code has to run on the data through a region. A verified region runs a pure closure on the inner value and returns a `PCon` with the same policy, so the result is still protected. `fold_in()` then turns the resulting `PCon<Option<i32>, _>` into an `Option<PCon<i32, _>>`. A critical region, in contrast, checks the policy against the context and hands back the raw value, and is reserved for side effects such as sending an email.
 
 With context defined, we are ready to implement our 5 policies in `policy.rs`, let's start with DP2 `ViewPurchasePolicy` by adding some imports.
+
+## Integration 2: Defining Policies
 
 ```rs
 // policy.rs
@@ -379,6 +390,7 @@ impl SchemaPolicy for ViewPurchasePolicy {
 }
 ```
 
+## Integration 3-A: Sesame in the Data Layer 
 This entails changing `model.rs` for consistency with the above. There we need to mirror the policy on each column and make `Purchase` implement the `From<PConRow>` trait.
 ```rs
 use sesame::SesameType;
@@ -576,6 +588,9 @@ impl Database {
 
 Notice that if we were to use the `conn` connection for `is_seller` and `has_stock`, `database.rs` would deadlock when checking `AddPurchasePolicy`. This is because the database call invokes a policy check which, itself, needs to make another database call. For that reason, we modified our `database.rs` to contain two database connections and split the policy methods from the application connection. More idiomatic methods to mitigate this problem are unknown to the author at the at the time of writing. 
 
+
+## Integration 3-B: Sesame in the API Layer 
+
 Jumping up a layer, we need to reflect the changes in `controller.rs`. Which boils down to defining a cookie-handler object we'll call `LoggedIn`, and implementing a `FromPConRequest` trait for it. You can find an implemented example endpoint below for [controller.rs](./src/controller.rs) 
 
 ```rs
@@ -676,3 +691,82 @@ async fn main() {
     }
 }
 ```
+
+## Integration 3-C: Sesame in the Business Layer: Privacy Regoins
+
+Often times, while processing a request, one might wish to manipulate data beyond simply sending it to the database. This includes performing business logic on said data that may run in the same process (e.g. multiplication by 2), or might run on a different machine (e.g. sending the data to an external exchange-rate conversion service). In each of these cases, Sesame's `PCon<_,_>` prevents the developer from accessing or releasing the underlying data. Fortunetly, Sesame provides tools that re-enable this flexibility: Regions.
+
+Sesame defines four types of regions: Verified Regions, Critical Regions, Unchecked Critical Regions, and Sandboxes. 
+
+### Verified Regions
+
+```rs
+use sesame::verified::VerifiedRegion;
+
+// Format a purchase's price for display; the result is still protected by ViewPurchasePolicy.
+let price: PCon<String, ViewPurchasePolicy> = purchase.price_cents
+    .into_verified(VerifiedRegion::new(|cents: i64| format!("${}.{:02}", cents / 100, cents % 100)));
+```
+
+Verified regions are used for pure computation over PCon-protected data. The closure's result is re-boxed under the same policy, so no policy check is needed. They are only "verified" when Scrutinizer is run. Scrutinizer statically verifies the closure is pure (no I/O, no globals, and no `println!`). See [SCRUTINIZER.md](../../SCRUTINIZER.md).
+
+### Critical Regions
+
+```rs
+use sesame::critical::{CriticalRegion, Signature};
+
+// Email the buyer a receipt. Runs only if ViewPurchasePolicy allows it in this context.
+let sent = purchase.price_cents.into_critical(
+    context.clone(),
+    CriticalRegion::new(
+        |cents: i64, email: String| send_receipt(&email, cents),
+        Signature { username: "reviewer", signature: "..." },
+    ),
+    buyer_email,
+);
+```
+
+(Checked) Critical Regions are used when data has to leave Sesame through means that are not a Sesame-provided library (e.i. Sesame has no sink for). The policy is checked before the closure is run. Unlike Verified Regions, the closure's return is not re-boxed into a PCon. This fact, and the fact that one could arbitrarly share data make (Checked) Critical Regions require the signature of a reviewer. 
+
+### Unchecked Critical Regions
+
+```rs
+use sesame::critical::{Signature, UncheckedCriticalRegion};
+
+// Migration script: copy every purchase into the archive, regardless of policy.
+purchase.price_cents.into_critical_unchecked(
+    UncheckedCriticalRegion::new(
+        |cents: i64, policy: ViewPurchasePolicy, archive: &Archive| archive.write(cents, policy),
+        Signature { username: "reviewer", signature: "..." },
+    ),
+    &archive,
+);
+```
+
+Same as a critical region but with no policy check. The closure gets the raw value *and* the policy object, so it can re-box, inspect, or store the policy.
+
+### Sandboxes
+
+```rs
+// In a separate sandbox crate, compiled to WASM.
+use sesame::sandbox::SesameSandbox;
+
+#[SesameSandbox()]
+pub fn receipt_hash(inputs: (String, i64)) -> String {
+    // Arbitrary, unverified code (e.g. a third-party crate) runs here.
+    sha256(format!("{}:{}", inputs.0, inputs.1))
+}
+```
+```rs
+// In the application.
+use sesame::policy::{AnyPolicy, AnyPolicyDyn};
+use sesame::sandbox::execute_sandbox;
+
+let hash: PCon<String, AnyPolicy> =
+    execute_sandbox::<receipt_hash, _, _, dyn AnyPolicyDyn>((buyer_email, purchase.price_cents));
+```
+
+Sandboxes are verified region that are pure but couldn't be proven pure by Scrutinizer. Sandboxed regions instead compile the code to an isolated environment (WASM) where the function runs without access to IO, network, memory, etc...  
+
+See the [sandbox build instructions](../../sesame/build/README.md) and the [sandbox examples](../sandbox/).
+
